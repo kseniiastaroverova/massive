@@ -34,8 +34,24 @@ from massive import (
 )
 import transformers
 from ruamel.yaml import YAML
+import wandb
+
 
 logger = logging.getLogger('massive_logger')
+
+def wandb_init(
+    config: dict,
+    wb_key: str, 
+):
+    wb_username = config.get('wb.wb_username')
+    wb_project = config.get('wb.wb_project')
+    os.environ['WANDB_API_KEY'] = wb_key
+    os.environ['WANDB_USERNAME'] = wb_username
+    os.environ['WANDB_PROJECT'] = wb_project
+
+    wandb.login(key=wb_key)
+    wandb.init(project=wb_project, entity=wb_username, config=config)
+
 
 def main():
     """ Run Training """
@@ -43,10 +59,12 @@ def main():
     parser = argparse.ArgumentParser(description="Training on the MASSIVE dataset")
     parser.add_argument('-c', '--config', help='path to run configuration yaml')
     parser.add_argument('--local_rank', help='local rank of this process. Optional')
+    parser.add_argument('-k', '--wb_key', help='key for wb login')
     args = parser.parse_args()
 
     # create the massive.Configuration master config object
     conf = read_conf(args.config)
+    wandb_init(conf, args.wb_key)
     trainer_args = MASSIVETrainingArguments(**conf.get('train_val.trainer_args'))
     if args.local_rank:
         trainer_args.local_rank = int(args.local_rank)
