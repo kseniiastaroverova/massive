@@ -256,8 +256,9 @@ class DatasetCreator:
         self.train = self.train.map(create_numeric_labels) if self.train else None
         self.dev = self.dev.map(create_numeric_labels) if self.dev else None
         self.test = self.test.map(create_numeric_labels) if self.test else None
-        if self.hidden_eval[0]['intent_str']:
-            self.hidden_eval = self.hidden_eval.map(create_numeric_labels)
+        if self.hidden_eval:
+            if self.hidden_eval[0]['intent_str']:
+                self.hidden_eval = self.hidden_eval.map(create_numeric_labels)
 
     def save_label_dicts(self, output_prefix):
         """
@@ -266,7 +267,6 @@ class DatasetCreator:
         :param output_prefix: The location and file prefix for saving the dictionaries
         :type output_prefix: str
         """
-
         with open(output_prefix+'.intents', "w") as i, open(output_prefix+'.slots', "w") as s:
             # swap the keys and vals to use the index as key and slot as val
             json.dump({v: k for k, v in self.intent_dict.items()}, i)
