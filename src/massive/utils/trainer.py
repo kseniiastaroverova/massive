@@ -16,8 +16,6 @@ limitations under the License.
 This module contains code adapted from `transformers`.
 Copyright and license details can be found in `NOTICE.md`.
 """
-
-import glob
 import math
 import os
 import time
@@ -286,10 +284,8 @@ class MASSIVETrainer(transformers.Trainer):
         response = super()._save_checkpoint(model, trial, metrics)
         output_dir = self.args.output_dir
 
-        latest_checkpoint_dir = max(glob.glob(os.path.join(output_dir, "*/")), key=os.path.getmtime)
-        logger.info(f"From {output_dir=} to GCS {self.args.run_name}")
         upload_checkpoint_gcp(
-            local_path=latest_checkpoint_dir,
+            output_dir=output_dir,
             gcs_path=self.args.run_name,
         )
         return response
