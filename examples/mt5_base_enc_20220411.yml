@@ -64,7 +64,6 @@ train_val:
   eval_metrics: all
   trainer_args:
     output_dir: /root/massive/output/optimized_run_all_and_each_20220411/
-    gc_bucket: massive_ks
     evaluation_strategy: steps
     eval_steps: 100
     eval_accumulation_steps: 4

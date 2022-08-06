@@ -32,7 +32,7 @@ from transformers.trainer_utils import (
     speed_metrics,
 )
 
-from gc_utils import upload_checkpoint_gcp
+from .gc_utils import upload_checkpoint_gcp
 
 
 class MASSIVETrainer(transformers.Trainer):
@@ -283,14 +283,13 @@ class MASSIVETrainer(transformers.Trainer):
 
     def _save_checkpoint(self, model, trial, metrics=None):
         logger.info("Start checkpoint saving...")
-        response = super().__init__()
-        latest_checkpoint_dir = max(
-            glob.glob(os.path.join(self.args.output_dir, "*/")), key=os.path.getmtime
-        )
-        logger.info(f"From {latest_checkpoint_dir=} to GCS {self.args.gc_bucket}, {self.args.run_name}")
+        response = super()._save_checkpoint(model, trial, metrics)
+        output_dir = self.args.output_dir
+
+        latest_checkpoint_dir = max(glob.glob(os.path.join(output_dir, "*/")), key=os.path.getmtime)
+        logger.info(f"From {output_dir=} to GCS {self.args.run_name}")
         upload_checkpoint_gcp(
             local_path=latest_checkpoint_dir,
-            bucket=self.args.gc_bucket,
             gcs_path=self.args.run_name,
         )
         return response
