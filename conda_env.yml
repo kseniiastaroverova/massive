@@ -100,4 +100,5 @@ dependencies:
     - yarl==1.7.2
     - loguru
     - google-cloud-storage
+    - wandb
 prefix: /home/jgmf/miniconda3/envs/massive
