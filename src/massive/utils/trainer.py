@@ -17,13 +17,23 @@ This module contains code adapted from `transformers`.
 Copyright and license details can be found in `NOTICE.md`.
 """
 
+import glob
 import math
+import os
 import time
-
 from collections import namedtuple
+
 import datasets
 import transformers
-from transformers.trainer_utils import EvalLoopOutput, speed_metrics
+from loguru import logger
+from transformers.trainer_utils import (
+    PREFIX_CHECKPOINT_DIR,
+    EvalLoopOutput,
+    speed_metrics,
+)
+
+from gc_utils import upload_checkpoint_gcp
+
 
 class MASSIVETrainer(transformers.Trainer):
     """
@@ -33,11 +43,16 @@ class MASSIVETrainer(transformers.Trainer):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        if not hasattr(self.args, 'locale_eval_strategy'):
-            self.args.locale_eval_strategy = 'all only'
+        if not hasattr(self.args, "locale_eval_strategy"):
+            self.args.locale_eval_strategy = "all only"
 
-    def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix='eval',
-                 return_all_outputs=False):
+    def evaluate(
+        self,
+        eval_dataset=None,
+        ignore_keys=None,
+        metric_key_prefix="eval",
+        return_all_outputs=False,
+    ):
         """
         Adapted from:
         https://github.com/huggingface/transformers/blob/master/src/transformers/trainer.py
@@ -72,26 +87,26 @@ class MASSIVETrainer(transformers.Trainer):
         # use two prefixes and add step/epoch info
         first_metric_key_prefix = metric_key_prefix
         metrics = {}
-        metrics['training_global_step'] = self.state.global_step
-        metrics['training_epoch'] = self.state.epoch
+        metrics["training_global_step"] = self.state.global_step
+        metrics["training_epoch"] = self.state.epoch
 
         eval_dataset = eval_dataset if eval_dataset else self.eval_dataset
 
         # Create a list of eval runs based on the strategy
         if self.args.locale_eval_strategy == "all and each":
-            locales = sorted(set(eval_dataset['locale']))
-            locales.append('all')
+            locales = sorted(set(eval_dataset["locale"]))
+            locales.append("all")
         elif self.args.locale_eval_strategy == "all only":
-            locales = ['all']
+            locales = ["all"]
         # add more strategies here
         else:
-            raise NotImplementedError('locale_eval_strategy not known')
+            raise NotImplementedError("locale_eval_strategy not known")
 
         # loop through all locales (including "all") and run evaluation
         for locale in locales:
 
             metric_key_prefix = first_metric_key_prefix + "_" + locale
-            if locale == 'all':
+            if locale == "all":
                 # use whole dataset
                 dataset = eval_dataset
             else:
@@ -101,20 +116,23 @@ class MASSIVETrainer(transformers.Trainer):
                 # We'll suppress these warnings by temporarily changing the logging level
                 lvl = datasets.logging.get_verbosity()
                 datasets.logging.set_verbosity(50)
-                dataset = eval_dataset.filter(lambda x: x['locale'] == locale)
+                dataset = eval_dataset.filter(lambda x: x["locale"] == locale)
                 datasets.logging.set_verbosity(lvl)
 
             eval_dataloader = self.get_eval_dataloader(dataset)
             start_time = time.time()
 
-            eval_loop = self.prediction_loop if self.args.use_legacy_prediction_loop \
-                                             else self.evaluation_loop
+            eval_loop = (
+                self.prediction_loop
+                if self.args.use_legacy_prediction_loop
+                else self.evaluation_loop
+            )
             output = eval_loop(
                 eval_dataloader,
                 description="Evaluation",
                 # No point gathering the predictions if there are no metrics, otherwise we defer to
                 # self.args.prediction_loss_only
-                #prediction_loss_only=True if self.compute_metrics is None else None,
+                # prediction_loss_only=True if self.compute_metrics is None else None,
                 ignore_keys=ignore_keys,
                 metric_key_prefix=metric_key_prefix,
             )
@@ -130,8 +148,9 @@ class MASSIVETrainer(transformers.Trainer):
                 )
             )
 
-        self.control = self.callback_handler.on_evaluate(self.args, self.state, self.control,
-                                                         metrics)
+        self.control = self.callback_handler.on_evaluate(
+            self.args, self.state, self.control, metrics
+        )
 
         self._memory_tracker.stop_and_update_metrics(metrics)
 
@@ -143,50 +162,54 @@ class MASSIVETrainer(transformers.Trainer):
                 predictions=output.predictions,
                 label_ids=output.label_ids,
                 metrics=metrics,
-                num_samples=output.num_samples
+                num_samples=output.num_samples,
             )
 
         self.log(metrics)
 
         return metrics
 
-    def predict(self, test_dataset, ignore_keys=None, metric_key_prefix='test', tokenizer=None):
+    def predict(self, test_dataset, ignore_keys=None, metric_key_prefix="test", tokenizer=None):
         """
         Overriding this method for custom test result logging using `evaluate`
         """
 
         output = self.evaluate(
-            test_dataset,
-            ignore_keys,
-            metric_key_prefix,
-            return_all_outputs=True
+            test_dataset, ignore_keys, metric_key_prefix, return_all_outputs=True
         )
 
         PredictionOutput = namedtuple(
-            'PredictionOutput',
-            ['predictions', 'label_ids', 'metrics', 'ids', 'locales', 'utts', 'tok_utts',
-             'subword_aligns']
+            "PredictionOutput",
+            [
+                "predictions",
+                "label_ids",
+                "metrics",
+                "ids",
+                "locales",
+                "utts",
+                "tok_utts",
+                "subword_aligns",
+            ],
         )
 
-        subword_aligns=None
+        subword_aligns = None
         if tokenizer:
             tokenized_inputs = self.tokenizer(
-                [item['utt'] for item in test_dataset],
-                truncation=True,
-                is_split_into_words=True
+                [item["utt"] for item in test_dataset], truncation=True, is_split_into_words=True
             )
-            subword_aligns = [tokenized_inputs.word_ids(batch_index=i) \
-                              for i in range(len(test_dataset))]
+            subword_aligns = [
+                tokenized_inputs.word_ids(batch_index=i) for i in range(len(test_dataset))
+            ]
 
-        preds =  PredictionOutput(
+        preds = PredictionOutput(
             predictions=output.predictions,
             label_ids=output.label_ids,
             metrics=output.metrics,
-            ids=[x['id'] for x in test_dataset],
-            locales=[x['locale'] for x in test_dataset],
-            utts=[x['utt'] for x in test_dataset],
+            ids=[x["id"] for x in test_dataset],
+            locales=[x["locale"] for x in test_dataset],
+            utts=[x["utt"] for x in test_dataset],
             tok_utts=[tokenizer.convert_ids_to_tokens(x) for x in tokenized_inputs.input_ids],
-            subword_aligns=subword_aligns
+            subword_aligns=subword_aligns,
         )
 
         return preds
@@ -205,54 +228,73 @@ class MASSIVETrainer(transformers.Trainer):
 
         # Iterate through the metrics and get the highest and lowest values and locales
         for k, v in metrics.items():
-            pieces = k.split('_')
+            pieces = k.split("_")
 
             if len(pieces) < 3:
                 continue
 
             pre = pieces[0]
             locale = pieces[1]
-            metric = '_'.join(pieces[2:])
+            metric = "_".join(pieces[2:])
 
-            if metric in ['loss', 'samples_per_second', 'steps_per_second', 'runtime', 'step']:
+            if metric in ["loss", "samples_per_second", "steps_per_second", "runtime", "step"]:
                 continue
 
-            if 'stderr' in metric:
+            if "stderr" in metric:
                 continue
 
-            if v > highest_val.get(metric, float('-inf')):
+            if v > highest_val.get(metric, float("-inf")):
                 highest_val[metric] = v
                 highest_locale[metric] = locale
 
-            if v < lowest_val.get(metric, float('inf')):
+            if v < lowest_val.get(metric, float("inf")):
                 lowest_val[metric] = v
                 lowest_locale[metric] = locale
 
         # Iterate through the newly found keys and log and save the values
         for metric in highest_locale.keys():
-            highest_locale_key = pre + '_highest-locale_' + metric
-            highest_locale_val_key = pre + '_highest-locale-val_' + metric
-            lowest_locale_key = pre + '_lowest-locale_' + metric
-            lowest_locale_val_key = pre + '_lowest-locale-val_' + metric
-            all_locale_key = pre + '_all_' + metric
-            self.log({
-                'training_global_step': self.state.global_step,
-                'training_epoch': self.state.epoch,
-                'metric': metric,
-                'highest_locale': highest_locale[metric],
-                'highest_val': highest_val[metric],
-                'lowest_locale': lowest_locale[metric],
-                'lowest_val': lowest_val[metric],
-                all_locale_key: metrics[all_locale_key]
-            })
-            metrics.update({
-                highest_locale_key: highest_locale[metric],
-                highest_locale_val_key: highest_val[metric],
-                lowest_locale_key: lowest_locale[metric],
-                lowest_locale_val_key: lowest_val[metric],
-            })
+            highest_locale_key = pre + "_highest-locale_" + metric
+            highest_locale_val_key = pre + "_highest-locale-val_" + metric
+            lowest_locale_key = pre + "_lowest-locale_" + metric
+            lowest_locale_val_key = pre + "_lowest-locale-val_" + metric
+            all_locale_key = pre + "_all_" + metric
+            self.log(
+                {
+                    "training_global_step": self.state.global_step,
+                    "training_epoch": self.state.epoch,
+                    "metric": metric,
+                    "highest_locale": highest_locale[metric],
+                    "highest_val": highest_val[metric],
+                    "lowest_locale": lowest_locale[metric],
+                    "lowest_val": lowest_val[metric],
+                    all_locale_key: metrics[all_locale_key],
+                }
+            )
+            metrics.update(
+                {
+                    highest_locale_key: highest_locale[metric],
+                    highest_locale_val_key: highest_val[metric],
+                    lowest_locale_key: lowest_locale[metric],
+                    lowest_locale_val_key: lowest_val[metric],
+                }
+            )
 
         return metrics
+
+    def _save_checkpoint(self, model, trial, metrics=None):
+        logger.info("Start checkpoint saving...")
+        response = super().__init__()
+        latest_checkpoint_dir = max(
+            glob.glob(os.path.join(self.args.output_dir, "*/")), key=os.path.getmtime
+        )
+        logger.info(f"From {latest_checkpoint_dir=} to GCS {self.args.gc_bucket}, {self.args.run_name}")
+        upload_checkpoint_gcp(
+            local_path=latest_checkpoint_dir,
+            bucket=self.args.gc_bucket,
+            gcs_path=self.args.run_name,
+        )
+        return response
+
 
 class MASSIVESeq2SeqTrainer(transformers.Seq2SeqTrainer):
     """
@@ -262,11 +304,18 @@ class MASSIVESeq2SeqTrainer(transformers.Seq2SeqTrainer):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        if not hasattr(self.args, 'locale_eval_strategy'):
-            self.args.locale_eval_strategy = 'all only'
+        if not hasattr(self.args, "locale_eval_strategy"):
+            self.args.locale_eval_strategy = "all only"
 
-    def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix='eval',
-                 max_length=None, num_beams=None, return_all_outputs=False):
+    def evaluate(
+        self,
+        eval_dataset=None,
+        ignore_keys=None,
+        metric_key_prefix="eval",
+        max_length=None,
+        num_beams=None,
+        return_all_outputs=False,
+    ):
         """
         Adapted from:
         https://github.com/huggingface/transformers/blob/master/src/transformers/trainer.py
@@ -298,7 +347,9 @@ class MASSIVESeq2SeqTrainer(transformers.Seq2SeqTrainer):
         """
 
         # for generation
-        self._max_length = max_length if max_length is not None else self.args.generation_max_length
+        self._max_length = (
+            max_length if max_length is not None else self.args.generation_max_length
+        )
         self._num_beams = num_beams if num_beams is not None else self.args.generation_num_beams
 
         # memory metrics - must set up as early as possible
@@ -307,26 +358,26 @@ class MASSIVESeq2SeqTrainer(transformers.Seq2SeqTrainer):
         # use two prefixes and add step/epoch info
         first_metric_key_prefix = metric_key_prefix
         metrics = {}
-        metrics['training_global_step'] = self.state.global_step
-        metrics['training_epoch'] = self.state.epoch
+        metrics["training_global_step"] = self.state.global_step
+        metrics["training_epoch"] = self.state.epoch
 
         eval_dataset = eval_dataset if eval_dataset else self.eval_dataset
 
         # Create a list of eval runs based on the strategy
         if self.args.locale_eval_strategy == "all and each":
-            locales = sorted(set(eval_dataset['locale']))
-            locales.append('all')
+            locales = sorted(set(eval_dataset["locale"]))
+            locales.append("all")
         elif self.args.locale_eval_strategy == "all only":
-            locales = ['all']
+            locales = ["all"]
         # add more strategies here
         else:
-            raise NotImplementedError('locale_eval_strategy not known')
+            raise NotImplementedError("locale_eval_strategy not known")
 
         # loop through all locales (including "all") and run evaluation
         for locale in locales:
 
             metric_key_prefix = first_metric_key_prefix + "_" + locale
-            if locale == 'all':
+            if locale == "all":
                 # use whole dataset
                 dataset = eval_dataset
             else:
@@ -336,20 +387,23 @@ class MASSIVESeq2SeqTrainer(transformers.Seq2SeqTrainer):
                 # We'll suppress these warnings by temporarily changing the logging level
                 lvl = datasets.logging.get_verbosity()
                 datasets.logging.set_verbosity(50)
-                dataset = eval_dataset.filter(lambda x: x['locale'] == locale)
+                dataset = eval_dataset.filter(lambda x: x["locale"] == locale)
                 datasets.logging.set_verbosity(lvl)
 
             eval_dataloader = self.get_eval_dataloader(dataset)
             start_time = time.time()
 
-            eval_loop = self.prediction_loop if self.args.use_legacy_prediction_loop \
-                                             else self.evaluation_loop
+            eval_loop = (
+                self.prediction_loop
+                if self.args.use_legacy_prediction_loop
+                else self.evaluation_loop
+            )
             output = eval_loop(
                 eval_dataloader,
                 description="Evaluation",
                 # No point gathering the predictions if there are no metrics, otherwise we defer to
                 # self.args.prediction_loss_only
-                #prediction_loss_only=True if self.compute_metrics is None else None,
+                # prediction_loss_only=True if self.compute_metrics is None else None,
                 ignore_keys=ignore_keys,
                 metric_key_prefix=metric_key_prefix,
             )
@@ -365,8 +419,9 @@ class MASSIVESeq2SeqTrainer(transformers.Seq2SeqTrainer):
                 )
             )
 
-        self.control = self.callback_handler.on_evaluate(self.args, self.state, self.control,
-                                                         metrics)
+        self.control = self.callback_handler.on_evaluate(
+            self.args, self.state, self.control, metrics
+        )
 
         self._memory_tracker.stop_and_update_metrics(metrics)
 
@@ -378,15 +433,22 @@ class MASSIVESeq2SeqTrainer(transformers.Seq2SeqTrainer):
                 predictions=output.predictions,
                 label_ids=output.label_ids,
                 metrics=metrics,
-                num_samples=output.num_samples
+                num_samples=output.num_samples,
             )
 
         self.log(metrics)
 
         return metrics
 
-    def predict(self, test_dataset, ignore_keys=None, max_length=None, num_beams=None,
-                metric_key_prefix='test', tokenizer=None):
+    def predict(
+        self,
+        test_dataset,
+        ignore_keys=None,
+        max_length=None,
+        num_beams=None,
+        metric_key_prefix="test",
+        tokenizer=None,
+    ):
         """
         Overriding this method for custom test result logging using `evaluate`
         """
@@ -397,25 +459,23 @@ class MASSIVESeq2SeqTrainer(transformers.Seq2SeqTrainer):
             max_length=max_length,
             num_beams=num_beams,
             metric_key_prefix=metric_key_prefix,
-            return_all_outputs=True
+            return_all_outputs=True,
         )
 
         PredictionOutput = namedtuple(
-            'PredictionOutput',
-            ['predictions', 'label_ids', 'metrics', 'ids', 'locales', 'utts']
+            "PredictionOutput", ["predictions", "label_ids", "metrics", "ids", "locales", "utts"]
         )
 
-        preds =  PredictionOutput(
+        preds = PredictionOutput(
             predictions=output.predictions,
             label_ids=output.label_ids,
             metrics=output.metrics,
-            ids=[x['id'] for x in test_dataset],
-            locales=[x['locale'] for x in test_dataset],
-            utts=[x['utt'] for x in test_dataset]
+            ids=[x["id"] for x in test_dataset],
+            locales=[x["locale"] for x in test_dataset],
+            utts=[x["utt"] for x in test_dataset],
         )
 
         return preds
-
 
     def _find_log_highest_lowest_locales(self, metrics):
         """
@@ -431,51 +491,55 @@ class MASSIVESeq2SeqTrainer(transformers.Seq2SeqTrainer):
 
         # Iterate through the metrics and get the highest and lowest values and locales
         for k, v in metrics.items():
-            pieces = k.split('_')
+            pieces = k.split("_")
 
             if len(pieces) < 3:
                 continue
 
             pre = pieces[0]
             locale = pieces[1]
-            metric = '_'.join(pieces[2:])
+            metric = "_".join(pieces[2:])
 
-            if metric in ['loss', 'samples_per_second', 'steps_per_second', 'runtime', 'step']:
+            if metric in ["loss", "samples_per_second", "steps_per_second", "runtime", "step"]:
                 continue
 
-            if 'stderr' in metric:
+            if "stderr" in metric:
                 continue
 
-            if v > highest_val.get(metric, float('-inf')):
+            if v > highest_val.get(metric, float("-inf")):
                 highest_val[metric] = v
                 highest_locale[metric] = locale
 
-            if v < lowest_val.get(metric, float('inf')):
+            if v < lowest_val.get(metric, float("inf")):
                 lowest_val[metric] = v
                 lowest_locale[metric] = locale
 
         # Iterate through the newly found keys and log and save the values
         for metric in highest_locale.keys():
-            highest_locale_key = pre + '_highest-locale_' + metric
-            highest_locale_val_key = pre + '_highest-locale-val_' + metric
-            lowest_locale_key = pre + '_lowest-locale_' + metric
-            lowest_locale_val_key = pre + '_lowest-locale-val_' + metric
-            all_locale_key = pre + '_all_' + metric
-            self.log({
-                'training_global_step': self.state.global_step,
-                'training_epoch': self.state.epoch,
-                'metric': metric,
-                'highest_locale': highest_locale[metric],
-                'highest_val': highest_val[metric],
-                'lowest_locale': lowest_locale[metric],
-                'lowest_val': lowest_val[metric],
-                all_locale_key: metrics[all_locale_key]
-            })
-            metrics.update({
-                highest_locale_key: highest_locale[metric],
-                highest_locale_val_key: highest_val[metric],
-                lowest_locale_key: lowest_locale[metric],
-                lowest_locale_val_key: lowest_val[metric],
-            })
+            highest_locale_key = pre + "_highest-locale_" + metric
+            highest_locale_val_key = pre + "_highest-locale-val_" + metric
+            lowest_locale_key = pre + "_lowest-locale_" + metric
+            lowest_locale_val_key = pre + "_lowest-locale-val_" + metric
+            all_locale_key = pre + "_all_" + metric
+            self.log(
+                {
+                    "training_global_step": self.state.global_step,
+                    "training_epoch": self.state.epoch,
+                    "metric": metric,
+                    "highest_locale": highest_locale[metric],
+                    "highest_val": highest_val[metric],
+                    "lowest_locale": lowest_locale[metric],
+                    "lowest_val": lowest_val[metric],
+                    all_locale_key: metrics[all_locale_key],
+                }
+            )
+            metrics.update(
+                {
+                    highest_locale_key: highest_locale[metric],
+                    highest_locale_val_key: highest_val[metric],
+                    lowest_locale_key: lowest_locale[metric],
+                    lowest_locale_val_key: lowest_val[metric],
+                }
+            )
 
         return metrics
